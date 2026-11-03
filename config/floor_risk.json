@@ -8,6 +8,8 @@
   "max_total_open_risk_pct": 5.0,
   "max_open_trades": 8,
   "max_same_direction_per_symbol": 3,
+  "no_stacking": {"symbols": ["XAUUSD"], "window_s": 900, "atr_mult": 0.5,
+                  "_comment": "no second bot may open the same trade: on these markets an entry is blocked while another bot holds a same-direction position opened in the last 15 min or within 0.5 ATR of this price"},
   "daily_floor_loss_limit_pct": 4.0,
   "daily_reset": "midnight Australia/Sydney",
   "max_floor_drawdown_pct": 10.0,

@@ -36,8 +36,8 @@ class Ctx:
             self.cache.move_to_end(k)
         return r
 
-def year_split_fitness(r, w, min_n, folds=None):
-    R = r[KEY]; n = len(R)
+def year_split_fitness(r, w, min_n, folds=None, key=None):
+    R = r[key or KEY]; n = len(R)
     if n < min_n: P = CFG.get("low_n_penalty", 5.0); return -P + P * n / min_n, {}
     ets = pd.to_datetime(r["ts"][r["ei"]], unit="s")
     if folds is None: folds = ets.year
@@ -52,7 +52,7 @@ def year_split_fitness(r, w, min_n, folds=None):
     fit = ts_.mean() - 0.5 * ts_.std() + 0.002 * dd
     return float(fit), metrics(R)
 
-def fitness(ctx, g, w=TRAIN, min_n=None, half_years=True):
+def fitness(ctx, g, w=TRAIN, min_n=None, half_years=True, key=None):
     """t-stat consistency across half-year (or quarter) folds on drift-adjusted R
     + prop-challenge score on raw P&L: chal_weight * (FTMO pass rate - breach rate) over rolling simulated attempts."""
     r = ctx.bt(g, w)
@@ -60,7 +60,7 @@ def fitness(ctx, g, w=TRAIN, min_n=None, half_years=True):
     if len(r["R"]):
         e = pd.to_datetime(r["ts"][r["ei"]], unit="s")
         folds = (e.year * 4 + (e.month - 1) // 3).values if not half_years else (e.year * 2 + (e.month > 6)).values
-    fit, m = year_split_fitness(r, w, min_n or CFG["min_train_trades"], folds)
+    fit, m = year_split_fitness(r, w, min_n or CFG["min_train_trades"], folds, key)
     if m and CFG["chal_weight"]:     # prop-challenge term disabled (chal_weight 0) at the user's request
         c = chal(r, g, w); m["chal"] = c
         fit += CFG["chal_weight"] * (c["pass_rate"] - c["breach_rate"])
@@ -96,15 +96,15 @@ def evolve_island(ctx, rng, pop_n, gens, w, min_n, on_gen=None, half_years=True)
         pop, meta = newpop, newmeta
     return pop, seen
 
-def plateau_ok(ctx, g, base_fit, rng, w=TRAIN, min_n=None, half_years=True, k=8):
+def plateau_ok(ctx, g, base_fit, rng, w=TRAIN, min_n=None, half_years=True, k=8, key=None):
     fs = []
     for _ in range(k):
         m = dict(g)
-        for key, (lo, hi, isint) in {**COMMON, **FAM[g["fam"]]}.items():
-            if key in ("tf", "trend", "side", "flip", "ss", "slen") or (g["fam"] >= 8 and key == "p1") or rng.random() > 0.4: continue
-            v = m[key] * (1 + rng.uniform(-0.12, 0.12))
-            m[key] = int(round(min(max(v, lo), hi))) if isint else round(float(min(max(v, lo), hi)), 3)
-        fs.append(fitness(ctx, m, w, min_n, half_years)[0])
+        for gk, (lo, hi, isint) in {**COMMON, **FAM[g["fam"]]}.items():
+            if gk in ("tf", "trend", "side", "flip", "ss", "slen") or (g["fam"] >= 8 and gk == "p1") or gk not in m or rng.random() > 0.4: continue
+            v = m[gk] * (1 + rng.uniform(-0.12, 0.12))
+            m[gk] = int(round(min(max(v, lo), hi))) if isint else round(float(min(max(v, lo), hi)), 3)
+        fs.append(fitness(ctx, m, w, min_n, half_years, key)[0])
     med = float(np.median(fs))
     return med > 0 and med >= CFG["plateau_frac"] * base_fit, med
 

@@ -22,6 +22,8 @@ from . import evolve as ev
 from .learn import LiveCtx, live_stats, KILL, now_s
 from .risk import load_cfg
 from . import learned
+from .brain import Brain
+from .engine import NEW_MAIN_FAMS
 
 GUARDS = dict(
     max_promotions_per_hour=3,      # across both symbols
@@ -57,6 +59,7 @@ SCALP_GUARDS = dict(GUARDS,
 SCALP_GENES = dict(tf=(0, 1), hold_h=(0.1, 0.75), sl=(0.05, 2.0), tp=(2.0, 3.0))
 GUARDS["train_gate"] = dict(pf=1.0, net_r=0.0); SCALP_GUARDS["train_gate"] = dict(pf=1.0, net_r=0.0)
 GUARDS["max_same_combo"] = 2; SCALP_GUARDS["max_same_combo"] = 3       # diversity: max live bots per indicator combination
+GUARDS["max_same_family"] = 5; SCALP_GUARDS["max_same_family"] = 7     # diversity: max live bots of one strategy family per market
 FAMS = None
 if FLOOR == "scalp":
     GUARDS = SCALP_GUARDS; FAMS = LEVEL_FAMS
@@ -79,11 +82,31 @@ def code_hash():
 CODE_HASH = code_hash()        # taken when this process imported its modules
 
 HKEY = "R"     # holdout / sealed gates use raw R after costs (what live earns), not the drift-adjusted fitness metric (review B3)
+EARN = "R"     # every PROMOTION decision (train gate, plateau, min fit, replacement, allocator, overlap) uses what a bot actually
+               # earned after costs. Breeding fitness stays drift-adjusted (ev.KEY) so the search still prefers non-beta edges.
 BATCH = 24; POOL = 60; DUTY = 0.5 if FLOOR == "main" else 0.4     # DUTY: fraction of wall time spent computing (rest sleeping)
+LIVE_TRUST_N = 30      # allocator: live trades at which the live record and the training fitness count equally
 RELOAD_S = 1800; KILL_EVERY_S = 20; REGATE_EVERY_S = 600; STATS = rfile("breeder_stats.json")
 POOLF = rfile("breeder_pool.json")
 N_RANDOM = 60                 # random bots per symbol for the "vs random" comparison
 LOG_FRAC = 0.35; LOG_KEEP_S = 3 * 86400; LESSONS_EVERY_S = 600
+
+def corr(a, b):
+    """|correlation| of two daily-P&L series (0 when either is flat)."""
+    if len(a) != len(b) or len(a) < 3 or np.std(a) == 0 or np.std(b) == 0: return 0.0
+    return abs(float(np.nan_to_num(np.corrcoef(a, b)[0, 1])))
+
+def diversity_block(k, same_market, whole_floor, G):
+    """Why candidate k may NOT join the floor on diversity grounds (None = fine). Caps: bots with the same style
+    (family + timeframe + long/short) and of the same strategy family on its market; bots with the same indicator combination
+    on the whole floor."""
+    style = lambda g: (g["fam"], g["tf"], g["side"])
+    if sum(style(g) == style(k) for g in same_market) >= G["max_same_style"]: return "same style already on the floor"
+    if sum(g["fam"] == k["fam"] for g in same_market) >= G["max_same_family"]:
+        return f"{G['max_same_family']} bots of this strategy family already on this market"
+    if sum(signature(g) == signature(k) for g in whole_floor) >= G["max_same_combo"]:
+        return f"indicator combo '{signature(k)}' already on the floor {G['max_same_combo']}x"
+    return None
 
 def syd_day(): return pd.Timestamp.now(tz="Australia/Sydney").strftime("%Y-%m-%d")
 
@@ -112,6 +135,7 @@ class Breeder:
             for k in ("tested_today", "promoted_today", "cut_today", "gate_today"): self.stats[k] = old.get(k, self.stats[k])
         self.rej = deque(); self.hb = {}; self.rej_today = Counter(old.get("reject_today", {}) if old.get("day") == self.stats["day"] else {})
         self.last_regate = 0.0
+        self.brain = Brain(fams=FAMS or NEW_MAIN_FAMS, tfs=SCALP_GENES["tf"] if FLOOR == "scalp" else (0, 1, 2, 3))
         self.started = time.time(); self.busy = 0.0; self.last_kill = 0; self.rand = {}; self.last_lessons = 0
 
     def random_baseline(self, sym, wk="held"):
@@ -131,7 +155,7 @@ class Breeder:
 
     def evidence(self, sym, g, fit, hm=None, backfilled=False, sm=None):
         c = self.get_ctx(sym); w = self.win[sym]
-        tm = metrics(c.bt(g, w["train"])[ev.KEY]); hm = hm or metrics(c.bt(g, w["held"])[HKEY])
+        tm = metrics(c.bt(g, w["train"])[EARN]); hm = hm or metrics(c.bt(g, w["held"])[HKEY])
         rb = self.random_baseline(sym); beat = round(100 * sum(x < hm["net_r"] for x in rb) / len(rb), 0)
         wins = lambda m: int(round(m["n"] * m["win"] / 100))
         return dict(floor=FLOOR, train_window=list(w["train"]), holdout_window=list(w["held"]), fitness=round(float(fit), 3),
@@ -143,7 +167,7 @@ class Breeder:
 
     def backfill_evidence(self):
         for bid, sym, g in self.db.execute("SELECT bot_id,symbol,genome FROM live_bots WHERE status IN ('live','probation') AND evidence IS NULL").fetchall():
-            g = json.loads(g); fit = ev.fitness(self.get_ctx(sym), g, self.win[sym]["train"])[0]
+            g = json.loads(g); fit = ev.fitness(self.get_ctx(sym), g, self.win[sym]["train"], key=EARN)[0]
             self.db.execute("UPDATE live_bots SET evidence=? WHERE bot_id=?", (json.dumps(self.evidence(sym, g, fit, backfilled=True)), bid))
         self.db.commit()
 
@@ -163,9 +187,11 @@ class Breeder:
     def bot_meta(self, bid, sym, g):
         if bid not in self.meta:
             c = self.get_ctx(sym); w = self.win[sym]
-            hist = ev.fitness(c, g, w["train"])[0]; rh = c.bt(g, w["held"]); hm = metrics(rh[HKEY])
-            self.meta[bid] = dict(sym=sym, g=g, hist=hist, held=hm, vol=max(ev.daily_r(c.bt(g, w["train"]), *w["train"], ev.KEY).std(), 1e-6),   # vol from TRAIN only (review H1)
-                                  dtrain=ev.daily_r(c.bt(g, w["train"]), *w["train"], ev.KEY).values, dheld=ev.daily_r(rh, *w["held"], ev.KEY).values)
+            hist = ev.fitness(c, g, w["train"], key=EARN)[0]; rh = c.bt(g, w["held"]); hm = metrics(rh[HKEY])
+            dtrain = ev.daily_r(c.bt(g, w["train"]), *w["train"], EARN)
+            self.meta[bid] = dict(sym=sym, g=g, hist=hist, held=hm, vol=max(dtrain.std(), 1e-6),   # vol from TRAIN only (review H1)
+                                  dtrain=dtrain.values, dheld=ev.daily_r(rh, *w["held"], EARN).values,
+                                  dsealed=ev.daily_r(c.bt(g, w["sealed"]), *w["sealed"], EARN).values)   # for the sealed-window overlap check only
         return self.meta[bid]
 
     def event(self, kind, bid, d):
@@ -199,7 +225,7 @@ class Breeder:
         same window (self.win[sym]['held']), same cached backtest (same data, costs and entry filters), same thresholds.
         Returns (stage, plain reason, train metrics, holdout metrics, holdout trades); stage None = passed."""
         G = GUARDS; gh = G["holdout_gate"]; tg = G["train_gate"]; ctx = self.get_ctx(sym); w = self.win[sym]
-        tm = metrics(ctx.bt(g, w["train"])[ev.KEY]); rh = ctx.bt(g, w["held"]); hm = metrics(rh[HKEY])
+        tm = metrics(ctx.bt(g, w["train"])[EARN]); rh = ctx.bt(g, w["held"]); hm = metrics(rh[HKEY])
         if not (tm["pf"] >= tg["pf"] and tm["net_r"] > tg["net_r"]):
             return "train", f"training PF {tm['pf']:.2f}, {tm['net_r']:+.1f}R after costs (needs PF >= {tg['pf']} and a profit)", tm, hm, rh
         if not (hm["n"] >= gh["n"] and hm["pf"] >= gh["pf"] and hm["net_r"] > gh["net_r"] and hm["t"] >= gh["t"] and hm["max_dd_pct"] >= gh["dd_pct"]):
@@ -235,19 +261,22 @@ class Breeder:
         print(now_s(), "CUT", bid, sym, why, flush=True)
 
     # ---------- breeding ----------
-    def tour(self, sym):
+    def tour(self, sym, with_fit=False):
         P = self.pool[sym]
         a, b = self.rng.integers(len(P), size=2)
-        return P[min(a, b)][1]          # pool is sorted best-first: lower index wins
+        return P[min(a, b)] if with_fit else P[min(a, b)][1]          # pool is sorted best-first: lower index wins
 
     def breed(self, sym):
         ctx = self.get_ctx(sym); w = self.win[sym]; rng = self.rng
-        kids = []; orig = []
+        kids = []; orig = []; parent_fit = []; sc = self.brain.scale[sym]
         for _ in range(BATCH):
-            u = rng.random()
-            if len(self.pool[sym]) >= 4 and u < 0.5:   kids.append(mutate(crossover(self.tour(sym), self.tour(sym), rng), rng)); orig.append("pool")
-            elif len(self.pool[sym]) >= 4 and u < 0.75: kids.append(mutate(self.tour(sym), rng, rate=0.4)); orig.append("pool")   # no children of floor bots: they were picked on the holdout (review H1)
-            else: kids.append(random_genome(rng, FAMS)); orig.append("random")
+            u = rng.random(); pf = None
+            if len(self.pool[sym]) >= 4 and u < 0.5:   kids.append(mutate(crossover(self.tour(sym), self.tour(sym), rng), rng, scale=sc)); orig.append("pool")
+            elif len(self.pool[sym]) >= 4 and u < 0.75:                  # no children of floor bots: they were picked on the holdout (review H1)
+                pf, par = self.tour(sym, with_fit=True); kids.append(mutate(par, rng, rate=0.4, scale=sc)); orig.append("pool")
+            else:                                                        # immigrant: uniform, or from the arm the brain favours
+                g, guided = self.brain.propose(sym, rng); kids.append(g); orig.append("guided" if guided else "random")
+            parent_fit.append(pf)
         kids = [scalpify(k) for k in kids]
         self.gen += 1
         scored = []; logrows = []; now_i = int(time.time())
@@ -265,6 +294,10 @@ class Breeder:
                                 float(fit), n, float(r["R"].sum()) if n else 0.0, float(r["cost_r"].sum()) if n else 0.0, o))
         if logrows:
             self.db.executemany("INSERT INTO cand_log VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", logrows); self.db.commit()
+        # brain: arms learn from immigrants only (TRAIN fitness); mutation step size from mutated children vs their parent
+        self.brain.learn(sym, [(k, f) for (f, k), o in zip(scored, orig) if o in ("random", "guided")])
+        for (f, k), pf in zip(scored, parent_fit):
+            if pf is not None: self.brain.mutation_result(sym, f > pf)
         new = 0
         for k in kids:
             h = hash((sym, gkey(k)))
@@ -302,7 +335,9 @@ class Breeder:
 
     def _gate_one(self, sym, k, fit, roster, gt, G, gh, ctx, w):
         """Runs one candidate through the gate; returns the furthest stage it reached ('fit' = failed plateau)."""
-        ok, med = ev.plateau_ok(ctx, k, fit, self.rng, w["train"], k=6)
+        fit = ev.fitness(ctx, k, w["train"], key=EARN)[0]           # what it actually earned in training (not drift-adjusted)
+        if fit < G["min_fit"]: self._why = "earned too little in training after costs"; return "fit"
+        ok, med = ev.plateau_ok(ctx, k, fit, self.rng, w["train"], k=6, key=EARN)
         if "plateau_slack" in G: ok = med >= fit - G["plateau_slack"] * max(1.0, abs(fit))     # scalp: nudged settings must not collapse
         if not ok: self._why = "unstable when settings are nudged"; return "fit"
         gt["plateau"] += 1
@@ -311,14 +346,11 @@ class Breeder:
         if st == "held": self._why = "failed the unseen selection test" + (" (too few trades)" if hm["n"] < gh["n"] else ""); return "plateau"
         if st == "random": self._why = f"did not beat {G['beat_random_pct']}% of random bots"; return "plateau"
         gt["holdout"] += 1
-        style = lambda g: (g["fam"], g["tf"], g["side"])
-        if sum(style(g) == style(k) for _, g, _ in roster) >= G["max_same_style"]: self._why = "same style already on the floor"; return "holdout"
-        allg = [json.loads(g) for _, _, g, *_ in self.roster()]
-        if sum(signature(g) == signature(k) for g in allg) >= G["max_same_combo"]: self._why = f"indicator combo '{signature(k)}' already on the floor {G['max_same_combo']}x"; return "holdout"
+        why = diversity_block(k, [g for _, g, _ in roster], [json.loads(g) for _, _, g, *_ in self.roster()], G)
+        if why: self._why = why; return "holdout"
         gt["style"] += 1
-        dk = ev.daily_r(ctx.bt(k, w["train"]), *w["train"], ev.KEY).values; dh = ev.daily_r(rh, *w["held"], ev.KEY).values
-        cc = lambda a, b: abs(float(np.nan_to_num(np.corrcoef(a, b)[0, 1])))
-        if any(max(cc(dk, self.bot_meta(b, sym, g)["dtrain"]), cc(dh, self.bot_meta(b, sym, g)["dheld"])) > G["corr_max"] for b, g, _ in roster): self._why = "trades too much like a bot already on the floor"; return "style"
+        dk = ev.daily_r(ctx.bt(k, w["train"]), *w["train"], EARN).values; dh = ev.daily_r(rh, *w["held"], EARN).values
+        if any(max(corr(dk, self.bot_meta(b, sym, g)["dtrain"]), corr(dh, self.bot_meta(b, sym, g)["dheld"])) > G["corr_max"] for b, g, _ in roster): self._why = "trades too much like a bot already on the floor"; return "style"
         gt["corr"] += 1
         while self.promos and time.time() - self.promos[0] > 3600: self.promos.popleft()
         if len(self.roster()) >= load_cfg()["max_bots_on_floor"] and len(roster) < G["max_per_symbol"]:
@@ -328,7 +360,7 @@ class Breeder:
         # SEALED final test (review H1): newest 90 days, one look per genome ever, same strict rules as the selection holdout.
         if self.was_tested("sealed_tested", sym, k):
             self._why = "already used its one look at the sealed test"; return "corr"
-        sm = metrics(ctx.bt(k, w["sealed"])[HKEY])
+        rs = ctx.bt(k, w["sealed"]); sm = metrics(rs[HKEY])
         passed = (sm["n"] >= gh["n"] and sm["pf"] >= gh["pf"] and sm["net_r"] > gh["net_r"] and sm["t"] >= gh["t"] and sm["max_dd_pct"] >= gh["dd_pct"])
         if passed and "beat_random_pct" in G:
             rbs = self.random_baseline(sym, "sealed"); passed = 100 * sum(x < sm["net_r"] for x in rbs) / len(rbs) >= G["beat_random_pct"]
@@ -337,7 +369,13 @@ class Breeder:
         if not passed:
             self._why = "failed the sealed final test" + (" (too few trades)" if sm["n"] < gh["n"] else ""); return "corr"
         gt["sealed"] += 1
-        score = fit                       # replacement ranks on TRAIN fitness only, never on holdout results (review H1)
+        # overlap on the sealed window too: two bots can look different on older data and still take the same recent trades
+        ds = ev.daily_r(rs, *w["sealed"], EARN).values
+        twin = next((b for b, g, _ in roster if corr(ds, self.bot_meta(b, sym, g)["dsealed"]) > G["corr_max"]), None)
+        if twin is not None:
+            gt.setdefault("sealed_overlap", 0); gt["sealed_overlap"] += 1
+            self._why = "trades too much like a bot already on the floor (sealed test window)"; return "corr"
+        score = fit                       # replacement ranks on earned TRAIN fitness only, never on holdout results (review H1)
         if len(roster) >= G["max_per_symbol"]:
             worst = min(roster, key=lambda x: self.blended(x[0], sym, x[1]))
             if self.blended(worst[0], sym, worst[1]) >= score: self._why = "not stronger than the weakest bot"; return "not_stronger"
@@ -360,7 +398,8 @@ class Breeder:
 
     # ---------- allocator ----------
     def blended(self, bid, sym, g):
-        m = self.bot_meta(bid, sym, g); lm = metrics(live_stats(self.db, bid)); lw = min(1.0, lm["n"] / 30)
+        m = self.bot_meta(bid, sym, g); lm = metrics(live_stats(self.db, bid))
+        lw = lm["n"] / (lm["n"] + LIVE_TRUST_N)        # trust in the live record grows with its size: 50% at 30 trades, 75% at 90, never a cliff
         return (1 - lw) * m["hist"] + lw * lm["t"]          # TRAIN fitness + live paper t only; no holdout results in ranking (review H1)
 
     def rebalance(self):
@@ -400,7 +439,7 @@ class Breeder:
         s = dict(self.stats, updated=int(now), reject_last_hour=dict(rh.most_common()), reject_today=dict(self.rej_today),
                  top_reject=(top[0][0] if top else None), top_reject_share=(round(100 * top[0][1] / max(sum(rh.values()), 1)) if top else None), expected_trades_per_day=tpd, expected_trades_per_hour=round(sum(tpd.values()) / 24, 2), running_s=int(up), tested_last_hour=len(self.tested_hour), generation=self.gen,
                  cpu_duty=round(self.busy / max(up, 1), 3), guards=GUARDS, pool_best={k: (round(v[0][0], 2) if v else None) for k, v in self.pool.items()},
-                 windows=self.win)
+                 windows=self.win, brain=self.brain.summary())
         write_json(STATS, s)
         if now - self.last_lessons > LESSONS_EVERY_S and now - self.started > 120:
             self.last_lessons = now
@@ -408,7 +447,7 @@ class Breeder:
                 self.db.execute("DELETE FROM cand_log WHERE ts<?", (int(now - LOG_KEEP_S),)); self.db.execute("DELETE FROM gate_log WHERE ts<?", (int(now - LOG_KEEP_S),))
                 n = learned.record_lessons(self.db, learned.compute(rfile("ultron.db"), FLOOR)); print(now_s(), "lessons +", n, flush=True)
             except Exception as e: print(now_s(), "lessons error", e, flush=True)
-        write_json(POOLF, self.pool)
+        write_json(POOLF, self.pool); self.brain.save()
 
     def run(self):
         print(now_s(), "breeder start; floor", FLOOR, "code", CODE_HASH, "guards", json.dumps(GUARDS), flush=True)

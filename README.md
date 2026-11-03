@@ -86,3 +86,18 @@ floor status line: "Breeding: tested N in the last hour · top reject reason: X"
 * Level families (Scalp Pit) keep the full 20-day live window. Their setups stay armed on a level across chained entries, so their
   signals have no bounded look-back: live (20 days of history) and the backtest (years) can disagree on long-running setups.
   This was already true before the overhaul; `tests/test_market.py::test_level_families_need_full_window` documents it.
+
+## Search memory and promotion rules (Nov 2026)
+* `ultron/brain.py`: new random bots lean toward strategy family + timeframe pairs whose random bots keep landing in the top quarter
+  on TRAINING fitness (Thompson sampling, evidence fades with GAMMA). Diversity guards: a fixed 30% of new random bots stay fully
+  random, no single pair may take more than 15% of the guided picks, and the brain only learns from immigrants (never bred children,
+  never holdout or sealed results). Mutation step size self-tunes per market (1/5th success rule). State: results/brain.json.
+  Guided bots are logged as origin `guided`, so 'What Ultron learned' keeps making trait claims from fully random bots only.
+* Floor diversity caps: max 2 bots per style (family + timeframe + side) per market, max 2 per indicator combination on the floor
+  (3 in the Scalp Pit), and new: max 5 bots of one strategy family per market (7 in the Scalp Pit).
+* Promotion uses what a bot actually earned after costs (raw R): training gate, minimum fitness, nudge-stability check, replacement
+  ranking, the allocator's training score, overlap checks and the evidence on the cards. Breeding fitness stays drift-adjusted.
+* Overlap (daily-P&L correlation < corr_max) is checked on the training, selection-holdout AND sealed windows.
+* No stacking (`no_stacking` in config/*_risk.json): on gold, an entry is blocked while another bot holds a same-direction position
+  opened in the last 15 minutes or within 0.5 ATR of this price.
+* Allocator: trust in a bot's live record grows as n/(n+30) live trades (50% at 30, 75% at 90) instead of jumping to 100% at 30.

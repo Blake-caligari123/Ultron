@@ -199,7 +199,8 @@ class Floor:
 
     def open(self, b, d, mid, atr, now, sec, lvl_stop=None):
         g = b["g"]; sym = b["sym"]
-        ok, why, risk_usd = self.risk.check(self.pos, sym, d, b["w"], self.unreal_usd(), now, live_n=b.get("n", 0))   # < 30 live trades: 0.25x risk
+        ok, why, risk_usd = self.risk.check(self.pos, sym, d, b["w"], self.unreal_usd(), now, live_n=b.get("n", 0),   # < 30 live trades: 0.25x risk
+                                            price=mid, atr=atr)                                                     # gold: no stacking on another bot's trade
         if not ok:
             if why.endswith("|FIRSTDD"):
                 why = why[:-8]; self.dd_kill_check(now)

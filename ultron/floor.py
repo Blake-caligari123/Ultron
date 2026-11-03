@@ -135,7 +135,7 @@ def breeder_view(floor):
                 guards=b.get("guards"), gate_today=b.get("gate_today"), windows=b.get("windows"),
                 expected_tph=b.get("expected_trades_per_hour"), expected_tpd=b.get("expected_trades_per_day", {}),
                 top_reject=b.get("top_reject"), top_reject_share=b.get("top_reject_share"), reject_last_hour=b.get("reject_last_hour"),
-                reject_today=b.get("reject_today"), pool_best=b.get("pool_best"), cpu_duty=b.get("cpu_duty"))
+                reject_today=b.get("reject_today"), pool_best=b.get("pool_best"), cpu_duty=b.get("cpu_duty"), brain=b.get("brain"))
 
 # ---------------- /api/state ----------------
 def build_state(floor):
@@ -243,6 +243,7 @@ def build_learned(floor):
     with Q(floor) as q: res["lessons"] = q("SELECT ts, key, text, numbers FROM lessons ORDER BY ts DESC LIMIT 80")
     now_keys = {c["key"] for c in res["claims"]}
     for l in res["lessons"]: l["still_true"] = l["key"] in now_keys
+    res["brain"] = (breeder_view(floor) or {}).get("brain")
     return res
 
 @app.get("/api/learned")

@@ -50,3 +50,15 @@ def test_probation_risk_until_30_live_trades(db):
     small = rm.check({}, "XAUUSD", 1, 0.05, live_n=3)[2]                       # new bot: 0.25x, floored at min_pct 0.25%
     assert full == pytest.approx(50.0) and small == pytest.approx(25.0)
     assert rm.check({}, "XAUUSD", 1, 0.05, live_n=30)[2] == pytest.approx(full)
+
+def test_gold_no_stacking(db):
+    rm = RiskManager(db); now = time.time()
+    pos = {11: dict(sym="XAUUSD", dir=1, risk_usd=10, entry_ts=now - 300, entry=2400.0)}
+    ok, why, _ = rm.check(pos, "XAUUSD", 1, 0.05, now=now, price=2410.0, atr=5.0)
+    assert not ok and "stack on bot 11" in why                                 # opened 5 min ago: same trade
+    pos[11]["entry_ts"] = now - 3600
+    assert not rm.check(pos, "XAUUSD", 1, 0.05, now=now, price=2401.0, atr=5.0)[0]   # an hour old but same price (< 0.5 ATR)
+    assert rm.check(pos, "XAUUSD", 1, 0.05, now=now, price=2410.0, atr=5.0)[0]       # old and 2 ATR away: a different trade
+    assert rm.check(pos, "XAUUSD", -1, 0.05, now=now, price=2401.0, atr=5.0)[0]      # opposite direction is not stacking
+    pos[12] = dict(sym="BTCUSD", dir=1, risk_usd=10, entry_ts=now - 60, entry=70000.0)
+    assert rm.check(pos, "BTCUSD", 1, 0.05, now=now, price=70000.0, atr=100.0)[0]    # rule is gold-only by default

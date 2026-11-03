@@ -62,6 +62,18 @@ class Ledger:
     def pnl_since(self, ts):
         return sum(d for x, d in self.rows if x >= ts)
 
+NO_STACKING = dict(symbols=["XAUUSD"], window_s=900, atr_mult=0.5)     # default when the config has no "no_stacking" block
+
+def stacked(positions, sym, d, now, price, atr, rule):
+    """Bot id of an open position this entry would stack on (same market + direction, opened within window_s, or entered
+    within atr_mult x ATR of this price), else None. Only on the markets listed in the rule."""
+    if not rule or sym not in rule.get("symbols", ()): return None
+    for bid, p in positions.items():
+        if p.get("sym") != sym or p.get("dir") != d: continue
+        if p.get("entry_ts") is not None and now - p["entry_ts"] < rule.get("window_s", 0): return bid
+        if price is not None and atr and p.get("entry") is not None and abs(p["entry"] - price) <= rule.get("atr_mult", 0) * atr: return bid
+    return None
+
 class RiskManager:
     def __init__(self, db):
         self.db = db; self.last_block = {}; self.halt_day = None; self.blocked_today = 0; self.block_day = None
@@ -109,8 +121,8 @@ class RiskManager:
         return dict(equity=eq, open_risk_usd=open_risk, open_risk_pct=100 * open_risk / eq if eq > 0 else 0, open_trades=len(positions),
                     day_pnl_usd=day_pnl, day_pnl_pct=100 * day_pnl / day0_eq if day0_eq > 0 else 0, peak=L.peak, cfg=cfg)
 
-    def check(self, positions, sym, d, weight, unreal_usd=0.0, now=None, live_n=None):
-        """-> (ok, reason, risk_usd). positions: {bot_id: {sym, dir, risk_usd}}"""
+    def check(self, positions, sym, d, weight, unreal_usd=0.0, now=None, live_n=None, price=None, atr=None):
+        """-> (ok, reason, risk_usd). positions: {bot_id: {sym, dir, risk_usd, entry_ts, entry}}; price/atr enable the stacking rule."""
         s = self.snapshot(positions, unreal_usd, now); c = s["cfg"]; now = now or time.time()
         day = syd_day_start(now)
         if self.block_day != day: self.block_day = day; self.blocked_today = 0
@@ -129,6 +141,9 @@ class RiskManager:
         same = sum(1 for p in positions.values() if p["sym"] == sym and p["dir"] == d)
         if same >= c["max_same_direction_per_symbol"]:
             return False, f"{same} {'buy' if d > 0 else 'sell'} trades already open on this market (max {c['max_same_direction_per_symbol']})", risk
+        twin = stacked(positions, sym, d, now, price, atr, c.get("no_stacking", NO_STACKING))
+        if twin is not None:
+            return False, f"would stack on bot {twin}'s open {'buy' if d > 0 else 'sell'} (same trade already on)", risk
         if s["open_risk_usd"] + risk > c["max_total_open_risk_pct"] / 100 * s["equity"] + 1e-9:
             return False, f"risk in use {s['open_risk_pct']:.2f}% + {100 * risk / s['equity']:.2f}% would exceed {c['max_total_open_risk_pct']}%", risk
         return True, "", risk

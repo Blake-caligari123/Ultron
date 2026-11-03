@@ -334,7 +334,7 @@ function lineChart(id, series, labels, colors, unit){
 }
 function renderLearned(){
   const L = LEARNED; if (!L) return; $$(".fl-title").forEach(e => e.textContent = floorTitle());
-  $("#ln-basis").innerHTML = `Based on <b>${N(L.sample)}</b> bots Ultron tested in the last ${L.hours} hours (a 35% random sample of everything tested is logged), every gate run, and every bot on this floor. Claims about traits only use the randomly created bots, so Ultron's own favourites can't flatter themselves. A claim needs at least ${N(L.markets.XAUUSD?.min_sample || 1000)} random bots per market.`;
+  $("#ln-basis").innerHTML = `Based on <b>${N(L.sample)}</b> bots Ultron tested in the last ${L.hours} hours (a 35% random sample of everything tested is logged), every gate run, and every bot on this floor. Claims about traits only use the fully random bots (not the bred ones, and not the ones the search steered), so Ultron's own favourites can't flatter themselves. A claim needs at least ${N(L.markets.XAUUSD?.min_sample || 1000)} random bots per market.`;
   const KIND = {winning:["✅","Winning"], dying:["🪦","Dying out"], setting:["⚙️","Settings"], "kill pattern":["✕","Why bots die"], trend:["📈","Shifting"]};
   $("#ln-lessons").innerHTML = L.lessons.length ? L.lessons.map(l => `<div class="lesson"><span class="mut small">${new Date(l.ts).toLocaleString("en-AU",{timeZone:TZ, day:"numeric", month:"short", hour:"numeric", minute:"2-digit"})}</span> ${esc(l.text)} ${l.still_true?'<span class="badge pass">still true</span>':'<span class="badge dim">no longer seen</span>'}</div>`).join("")
     : `<div class="empty">No lessons yet — Ultron writes one down the first time the data clearly shows something (checked every 10 minutes).</div>`;
@@ -348,6 +348,13 @@ function renderLearned(){
       <h4>On this floor</h4>${tbl(["family","alive","cut","live paper profit"], (m.floor_families||[]).map(r => [esc(r.family), r.alive, r.cut, `<span class="${cls(r.live_profit_usd)}">${usd(r.live_profit_usd)}</span>`]))}
       <div class="grid2"><div><h4>Best 10% of new bots, hour by hour</h4><div class="mkey"><span><i class="k" style="background:${TK.gold}"></i>stop (× ATR)</span><span><i class="k" style="background:${TK.grn}"></i>target (× ATR)</span><span><i class="k" style="background:${TK.blu}"></i>max hold (h)</span></div><canvas class="lchart" id="lc-${sym}"></canvas></div>
         <div><h4>Family share of the best 10%</h4><div class="legend" id="lfl-${sym}"></div><canvas class="lchart" id="lf-${sym}"></canvas></div></div></section>`; }).join("");
+  const BR = L.brain;
+  $("#ln-brain").innerHTML = BR ? ["XAUUSD","BTCUSD"].map(sym => { const x = BR[sym]; if (!x) return "";
+    const row = r => [`${esc(r.family)} <span class="mut">${r.tf}</span>`, `${fmt(r.rate,0)}%`, `<b class="${r.lift>=1.2?"pos":r.lift<=0.8?"neg":""}">${fmt(r.lift,1)}×</b>`, fmt(r.evidence,0)];
+    return `<div><h4>${ASSET[sym]}</h4>${x.learning ? `<div class="mut small">${N(x.pulls)} new bots learned from · top-quarter bar: fitness ≥ ${fmt(x.threshold,2)} · mutation step ${fmt(100*x.mutation_scale,0)}% of each setting's range</div>
+      ${tbl(["leaning toward","hit rate","vs average","evidence"], x.focus.slice(0,5).map(row))}${tbl(["least promising","hit rate","vs average","evidence"], x.avoid.map(row))}`
+      : `<div class="empty">Still collecting its first ${N(40)} random bots on this market…</div>`}</div>`; }).join("")
+    : `<div class="empty">The breeder hasn't reported yet.</div>`;
   const K = L.kills; $("#ln-kills").innerHTML = K.total ? tbl(["why cut","bots"], Object.entries(K.by_reason).sort((a,b) => b[1]-a[1]).map(([k,v]) => [esc(k), v])) + `<div class="mut small" style="margin-top:8px">${K.total} bots cut on this floor · ${N(K.live_trades_of_cut_bots)} live paper trades between them · ${usd(-K.costs_paid_usd)} trading costs paid</div>` : `<div class="empty">No bots cut yet.</div>`;
   drawLearnedCharts();
 }
