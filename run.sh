@@ -2,7 +2,7 @@
 # Always-on supervisor for ULTRON PAPER floors: main floor + experimental Scalp Pit (ULTRON_FLOOR=scalp), each with its own
 # live paper process (ultron.live) and continuous breeder (ultron.breeder); one floor view on :8795 serves both.
 # Usage: ./run.sh start|stop|restart|status
-cd "${ULTRON_HOME:-$(cd "$(dirname "$0")" && pwd)}"
+cd "${ULTRON_HOME:-$(dirname "$0")}"
 export NUMBA_NUM_THREADS=1 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 loop() { # name, vmem_kb, cmd...
   local n=$1 vm=$2; shift 2

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Always-on supervisor for ULTRON paper floor + floor view. Usage: ./run.sh start|stop|status
-cd "${ULTRON_HOME:-$(cd "$(dirname "$0")" && pwd)}"
+cd "${ULTRON_HOME:-$(dirname "$0")}"
 loop() { # name, cmd...
   local n=$1; shift
   while true; do ulimit -v 3000000; nice -n 10 "$@" >> logs/$n.log 2>&1; echo "$(date) $n exited $?, restarting in 10s" >> logs/$n.log; sleep 10; done

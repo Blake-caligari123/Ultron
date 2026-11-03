@@ -147,7 +147,9 @@ def state(floor: str = "main"):
     events = q("SELECT * FROM live_events WHERE kind!='heartbeat' ORDER BY rowid DESC LIMIT 60")
     for e in events:
         nm = next((b["name"] for b in bots if b["bot_id"] == e["bot_id"]), None); e["name"] = nm
-    hb = q("SELECT ts FROM live_events ORDER BY rowid DESC LIMIT 1")
+    hb = q("SELECT ts, detail FROM live_events WHERE kind='heartbeat' ORDER BY rowid DESC LIMIT 1")      # live trader writes one every 5 min
+    hb_age = (time.time() - pd.Timestamp(hb[0]["ts"]).timestamp()) if hb else None
+    stale = hb_age is None or hb_age > 600
     allocs = q("SELECT ts, bot_id, symbol, weight FROM allocations WHERE run_id='live' ORDER BY ts DESC LIMIT 80")
     summary = dict(paper_account_usd=START, paper_profit_usd=round(realised + unreal, 2), realised_usd=round(realised, 2), open_usd=round(unreal, 2),
                    bots_alive=len(alive), trades_today=sum(1 for t in trades if t["exit_ts"] >= syd0), open_trades=len([b for b in alive if b.get("position")]),
@@ -161,7 +163,8 @@ def state(floor: str = "main"):
     nm = {b["bot_id"]: b["name"] for b in bots}; rrm = {b["bot_id"]: b["rr"] for b in bots}
     for t in trades[-200:]:
         t["name"] = nm.get(t["bot_id"], f"bot #{t['bot_id']}"); t["usd"] = round(trade_usd(t), 2); t["rr"] = rrm.get(t["bot_id"])
-    return JSONResponse(dict(now=int(time.time()), ticks=ticks, bots=bots, trades=trades[-200:], equity=eq, events=events, last_event=hb[0]["ts"] if hb else None,
+    return JSONResponse(dict(now=int(time.time()), ticks=ticks, bots=bots, trades=trades[-200:], equity=eq, events=events, last_event=hb[0]["ts"] if hb else None, last_heartbeat=hb[0]["ts"] if hb else None,
+                             heartbeat_age_s=(int(hb_age) if hb_age is not None else None), stale=stale,
                              allocations=allocs, summary=summary,
                              paper=dict(start_equity=START, risk_budget_pct=BUDGET_PCT, note="PAPER only. No broker, no orders.")), headers=NOCACHE)
 

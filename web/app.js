@@ -81,7 +81,9 @@ function renderMain(){
   const br = S.breeder; const N = x => (x||0).toLocaleString();
   const top = br && br.top_reject ? ` · top reject reason: ${esc(br.top_reject)}${br.top_reject_share!=null?` (${br.top_reject_share}%)`:""}` : "";
   const breed = br ? (br.running ? `<b>Breeding:</b> tested ${N(br.tested_last_hour)} in the last hour${top}<br><span class="mut">${N(br.tested_today)} tested today · ${N(br.promoted_today)} promoted · ${N(br.cut_today)} cut</span>` : `Breeder restarting…`) : `Breeder starting…`;
-  $("#status").innerHTML = `<span class="dot" style="${fresh?"":"background:#7a889b;box-shadow:none"}"></span>${breed}<br><span class="mut">${fresh?"Paper trading live":"Paper floor running (markets quiet)"} · ${S.bots_alive} bots · ${S.open_trades} in a trade now</span>`;
+  const stale = STATE.stale; const hbm = STATE.heartbeat_age_s==null ? "never" : `${Math.round(STATE.heartbeat_age_s/60)} min ago`;
+  const live = stale ? `<b style="color:#e5a33b">⚠ Floor data is stale — the live trader's last heartbeat was ${hbm}</b>` : (fresh?"Paper trading live":"Paper floor running (markets quiet)");
+  $("#status").innerHTML = `<span class="dot" style="${fresh&&!stale?"":"background:#7a889b;box-shadow:none"}"></span>${breed}<br><span class="mut">${live} · ${S.bots_alive} bots · ${S.open_trades} in a trade now</span>`;
   const p = S.paper_profit_usd; $("#n-profit").textContent = usd(p); $("#n-profit").className = "val " + (p>0?"pos":p<0?"neg":"");
   $("#n-bots").textContent = S.bots_alive; $("#n-bots-sub").textContent = br ? `${N(br.promoted_today)} new · ${N(br.cut_today)} cut today` : "";
   $("#n-trades").textContent = S.trades_today;

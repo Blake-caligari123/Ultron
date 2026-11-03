@@ -25,18 +25,28 @@ KEEP_DAYS = 20
 
 def day_key(ts): return (int(ts) + 3600) // 86400      # FTMO day = 00:00 CE(S)T ~ 23:00 UTC
 
+TICK_WARN_S = 120; TICK_DIE_S = 600     # watchdog: warn when a market's last tick is older than this; exit(2) past the second
+
+def gold_open(ts):
+    """Spot gold CFD hours (UTC, conservative): closed Fri 21:00 -> Sun 23:00 and the daily 21:00-23:00 break."""
+    d = time.gmtime(ts); wd, h = d.tm_wday, d.tm_hour      # Mon=0
+    if wd == 5 or (wd == 4 and h >= 21) or (wd == 6 and h < 23): return False
+    return not (21 <= h < 23)
+
 class Floor:
     def __init__(self):
         self.db = connect()
         self.df1 = {}; self.cur1 = {"XAUUSD": None}; self.quote = {}; self.last_tf_close = {}
         self.risk = RiskManager(self.db)
+        self.t0 = int(time.time()); self.gold_open_since = self.t0; self.was_gold_open = gold_open(self.t0)
+        self.last_stale_log = {}; self.last_skip_log = 0
         self.reload_roster()
 
     # ---------- state ----------
     def reload_roster(self):
-        rows = self.db.execute("SELECT bot_id,symbol,genome,weight FROM live_bots WHERE status IN ('live','probation')").fetchall()
+        rows = self.db.execute("SELECT bot_id,symbol,genome,weight,live_n FROM live_bots WHERE status IN ('live','probation')").fetchall()
         old_bots = getattr(self, "bots", {})
-        self.bots = {r[0]: dict(id=r[0], sym=r[1], g=json.loads(r[2]), w=r[3] or 0.0) for r in rows}
+        self.bots = {r[0]: dict(id=r[0], sym=r[1], g=json.loads(r[2]), w=r[3] or 0.0, n=r[4] or 0) for r in rows}
         self.pos = {r[0]: dict(sym=r[1], dir=r[2], entry_ts=r[3], entry=r[4], stop=r[5], tgt=r[6], risk=r[7], hold_until=r[8], risk_usd=r[9], cost_px=r[10])
                     for r in self.db.execute("SELECT bot_id,symbol,dir,entry_ts,entry,stop,tgt,risk,hold_until,risk_usd,cost_px FROM live_positions")}
         self.chal = {}      # prop-challenge tracking disabled (all chal_* hooks are no-ops when a bot has no challenge)
@@ -239,7 +249,7 @@ class Floor:
 
     def open(self, b, d, mid, atr, now, sec, lvl_stop=None):
         g = b["g"]; sym = b["sym"]
-        ok, why, risk_usd = self.risk.check(self.pos, sym, d, b["w"], self.unreal_usd(), now)
+        ok, why, risk_usd = self.risk.check(self.pos, sym, d, b["w"], self.unreal_usd(), now, live_n=b.get("n", 0))   # < 30 live trades: 0.25x risk
         if not ok:
             if why.endswith("|FIRSTDD"):
                 why = why[:-8]; self.dd_kill_check(now)
@@ -273,6 +283,7 @@ class Floor:
         self.db.execute("DELETE FROM live_positions WHERE bot_id=?", (bid,))
         self.db.execute("""UPDATE live_bots SET live_n=live_n+1, live_r=live_r+?, live_peak_r=MAX(live_peak_r, live_r+?),
                            live_dd_r=MIN(live_dd_r, live_r+?-MAX(live_peak_r, live_r+?)) WHERE bot_id=?""", (R, R, R, R, bid))
+        if bid in self.bots: self.bots[bid]["n"] = self.bots[bid].get("n", 0) + 1
         self.event("close", bid, dict(sym=p["sym"], reason=reason, exit=round(px, 3), r=round(R, 3)))
         if reason != "challenge breach": self.chal_on_close(bid, R, ts)
 
@@ -329,6 +340,8 @@ class Floor:
                     j = (await cl.get(SQ)).json()
                     pr = [p for p in j[0]["spreadProfilePrices"] if p["spreadProfile"] == "elite"][0]
                     ts = j[0]["ts"] // 1000; bid, ask = pr["bid"], pr["ask"]
+                    if ts != last_ts and time.time() - ts >= 120 and time.time() - self.last_skip_log >= 60:
+                        self.last_skip_log = time.time(); log.info("xau: skipping stale quote (%ds old)", int(time.time() - ts))
                     if ts != last_ts and time.time() - ts < 120:     # fresh tick only (market closed => stale)
                         last_ts = ts; mid = (bid + ask) / 2
                         self.quote["XAUUSD"] = dict(bid=bid, ask=ask, ts=ts)
@@ -356,8 +369,16 @@ class Floor:
             if n % 6 == 0:
                 for bid, c in self.chal.items():        # day roll for idle bots so 'daily loss used' resets at CE(S)T midnight
                     if c["status"] == "active" and day_key(now) != c["day_key"]: self.chal_roll_day(c, now); self.save_chal(c)
-            if n % 360 == 0:
-                self.db.execute("INSERT INTO live_events VALUES(?,?,?,?)", (time.strftime("%Y-%m-%dT%H:%M:%S%z"), "heartbeat", None, json.dumps(dict(bots=len(self.bots), open=len(self.pos)))))
+            ages = self.tick_ages(now)
+            if n % 6 == 0:
+                lb = {s: (str(self.df1[s].index[-1])[5:16] if s in self.df1 and len(self.df1[s]) else "-") for s in ("BTCUSD", "XAUUSD")}
+                log.info("alive: tick age BTC %s XAU %s%s | last bar BTC %s XAU %s | %d bots, %d open",
+                         self.fmt_age(ages["BTCUSD"]), self.fmt_age(ages["XAUUSD"]), "" if gold_open(now) else " (gold closed)",
+                         lb["BTCUSD"], lb["XAUUSD"], len(self.bots), len(self.pos))
+            if n % 30 == 0 or n == 1:      # every 5 min (was hourly), plus one right after start: the floor page treats > 10 min without one as stale
+                self.db.execute("INSERT INTO live_events VALUES(?,?,?,?)", (time.strftime("%Y-%m-%dT%H:%M:%S%z"), "heartbeat", None,
+                                json.dumps(dict(bots=len(self.bots), open=len(self.pos), tick_age_s={k: (None if v is None else int(v)) for k, v in ages.items()}))))
+            self.watchdog(now, ages)
             self.db.commit()
             if n % 30 == 0: self.save_live()
             try: self.dd_kill_check(now)
@@ -375,6 +396,31 @@ class Floor:
                     ids = {r[0] for r in self.db.execute("SELECT bot_id FROM live_bots WHERE status IN ('live','probation')")}
                     if ids != set(self.bots) or any(b not in ids for b in self.pos): self.reload_roster()
                 except Exception as e: log.warning("roster sync: %s", e)
+
+    def tick_ages(self, now):
+        out = {}
+        for s in ("BTCUSD", "XAUUSD"):
+            q = self.quote.get(s); out[s] = (now - q["ts"]) if q and q.get("ts") else None
+        return out
+
+    @staticmethod
+    def fmt_age(a): return "none" if a is None else f"{int(a)}s"
+
+    def watchdog(self, now, ages):
+        """Warn when a feed goes quiet (> 120s; gold only while its market is open); exit(2) past 600s so run.sh restarts us.
+        Positions live in the DB (live_positions) and are reloaded on start, so a restart does not close trades."""
+        go = gold_open(now)
+        if go and not self.was_gold_open: self.gold_open_since = now        # stale clock for gold starts at the market open
+        self.was_gold_open = go
+        for s in ("BTCUSD", "XAUUSD"):
+            if s == "XAUUSD" and not go: continue
+            q = self.quote.get(s); base = max(q["ts"] if q and q.get("ts") else 0, self.t0, self.gold_open_since if s == "XAUUSD" else 0)
+            age = now - base
+            if age > TICK_DIE_S:
+                log.error("watchdog: %s no fresh tick for %ds (> %ds); exiting rc=2 for a supervisor restart", s, age, TICK_DIE_S)
+                self.db.commit(); logging.shutdown(); os._exit(2)        # hard exit: an exception inside asyncio.gather would only cancel tasks
+            if age > TICK_WARN_S and now - self.last_stale_log.get(s, 0) >= 60:
+                self.last_stale_log[s] = now; log.warning("watchdog: %s last tick %ds ago (> %ds)", s, age, TICK_WARN_S)
 
     async def main(self):
         self.bootstrap()
