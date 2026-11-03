@@ -5,18 +5,23 @@ Limits live in config/floor_risk.json (reloaded when the file changes):
 Blocked signals are skipped and logged as 'blocked by floor limit'."""
 import json, os, time
 import pandas as pd
-from .db import ROOT, FLOOR
+from .db import ROOT, CODE, FLOOR
 
 def cfg_path(floor=None):
-    return os.path.join(ROOT, "config", "floor_risk.json" if (floor or FLOOR) == "main" else f"{floor or FLOOR}_risk.json")
+    """config/<floor>_risk.json under ULTRON_HOME, falling back to the copy shipped with the code."""
+    f = floor or FLOOR
+    name = "floor_risk.json" if f == "main" else f"{f}_risk.json"
+    p = os.path.join(ROOT, "config", name)
+    return p if os.path.exists(p) else os.path.join(CODE, "config", name)
 CFG_PATH = cfg_path()
-_cache = {"mtime": None, "cfg": None}
+_cache = {}
 
 def load_cfg(floor=None):
     p = cfg_path(floor) if floor else CFG_PATH
     m = os.path.getmtime(p); c = _cache.setdefault(p, {})
     if c.get("mtime") != m:
-        c["cfg"] = json.load(open(p)); c["mtime"] = m
+        with open(p) as f: c["cfg"] = json.load(f)
+        c["mtime"] = m
     return c["cfg"]
 
 def syd_day_start(ts=None):
@@ -28,35 +33,53 @@ def trade_usd(t):
     if t.get("risk_usd") is not None: return t["r"] * t["risk_usd"]
     return t["r"] * (t.get("weight") or 0) * 0.05 * 10000
 
+def _usd(r, risk_usd, weight):
+    return r * risk_usd if risk_usd is not None else r * (weight or 0) * 500.0
+
+class Ledger:
+    """Closed-trade equity, read incrementally (only rows with a higher id than last time).
+    Equity counts EVERY closed paper trade, whatever the bot's status now: retiring or killing a bot must not erase its losses.
+    An intentional account reset is explicit: set "equity_reset_ts" (unix s) in the config; trades that exited before it are
+    ignored. Changing the reset time or starting equity rebuilds the ledger from scratch."""
+    def __init__(self, db):
+        self.db = db; self.key = None
+
+    def _reset(self, key):
+        self.key = key; self.last_id = 0; self.start = key[1]; self.eq = key[1]; self.peak = key[1]; self.rows = []   # rows: (exit_ts, usd)
+
+    def sync(self):
+        cfg = load_cfg(); key = (int(cfg.get("equity_reset_ts", 0) or 0), float(cfg["equity_start_usd"]))
+        if key != self.key: self._reset(key)
+        new = self.db.execute("SELECT id, r, risk_usd, weight, exit_ts FROM live_trades WHERE id>? AND exit_ts>=? ORDER BY id",
+                              (self.last_id, key[0])).fetchall()
+        for i, r, u, w, x in new:
+            d = _usd(r, u, w); self.eq += d; self.peak = max(self.peak, self.eq); self.rows.append((x, d)); self.last_id = i
+        if new:
+            day_ago = min(syd_day_start() - 86400, time.time() - 2 * 86400)     # keep ~2 days of rows for day P&L
+            if self.rows and self.rows[0][0] < day_ago: self.rows = [x for x in self.rows if x[0] >= day_ago]
+        return self
+
+    def pnl_since(self, ts):
+        return sum(d for x, d in self.rows if x >= ts)
+
 class RiskManager:
     def __init__(self, db):
         self.db = db; self.last_block = {}; self.halt_day = None; self.blocked_today = 0; self.block_day = None
-        self.dd_halted = False
-
-    # Equity counts EVERY closed paper trade, whatever the bot's status now: retiring or killing a bot must not erase its losses.
-    # An intentional account reset is explicit: set "equity_reset_ts" (unix s) in the config; trades that exited before it are ignored.
-    def _trades(self, since_ts=None):
-        cfg = load_cfg(); t0 = max(int(cfg.get("equity_reset_ts", 0) or 0), int(since_ts or 0))
-        return self.db.execute("SELECT r, risk_usd, weight, exit_ts FROM live_trades WHERE exit_ts>=? ORDER BY exit_ts, id", (t0,)).fetchall()
+        self.dd_halted = False; self.ledger = Ledger(db)
 
     def equity(self):
-        cfg = load_cfg()
-        return cfg["equity_start_usd"] + sum(trade_usd(dict(r=r, risk_usd=u, weight=w)) for r, u, w, _ in self._trades())
+        return self.ledger.sync().eq
 
     def day_pnl_usd(self, unreal_usd=0.0, now=None):
-        d0 = syd_day_start(now)
-        return sum(trade_usd(dict(r=r, risk_usd=u, weight=w)) for r, u, w, _ in self._trades(d0)) + unreal_usd
+        return self.ledger.sync().pnl_since(syd_day_start(now)) + unreal_usd
 
     def peak_equity(self):
         """Highest closed-trade equity since start / equity_reset_ts (never below equity_start_usd)."""
-        eq = pk = load_cfg()["equity_start_usd"]
-        for r, u, w, _ in self._trades():
-            eq += trade_usd(dict(r=r, risk_usd=u, weight=w)); pk = max(pk, eq)
-        return pk
+        return self.ledger.sync().peak
 
     def floor_dd_pct(self, unreal_usd=0.0):
         """Peak-to-trough floor drawdown in % (<= 0), current equity including open (unrealised) P&L."""
-        pk = self.peak_equity(); return 100 * ((self.equity() + unreal_usd) / pk - 1) if pk > 0 else 0.0
+        L = self.ledger.sync(); return 100 * ((L.eq + unreal_usd) / L.peak - 1) if L.peak > 0 else 0.0
 
     def dd_kill_hit(self, unreal_usd=0.0):
         """True when the floor-wide drawdown kill is armed ("max_floor_drawdown_pct" in config) and breached.
@@ -75,12 +98,13 @@ class RiskManager:
         return equity * pct / 100
 
     def snapshot(self, positions, unreal_usd=0.0, now=None):
-        cfg = load_cfg(); eq = self.equity()
+        cfg = load_cfg(); L = self.ledger.sync(); eq = L.eq
         open_risk = sum((p.get("risk_usd") or 0) for p in positions.values())
-        day0_eq = eq - self.day_pnl_usd(0.0, now)                     # equity at the start of the Sydney day
-        day_pnl = self.day_pnl_usd(unreal_usd, now)
+        day_closed = L.pnl_since(syd_day_start(now))
+        day0_eq = eq - day_closed                                      # equity at the start of the Sydney day
+        day_pnl = day_closed + unreal_usd
         return dict(equity=eq, open_risk_usd=open_risk, open_risk_pct=100 * open_risk / eq if eq > 0 else 0, open_trades=len(positions),
-                    day_pnl_usd=day_pnl, day_pnl_pct=100 * day_pnl / day0_eq if day0_eq > 0 else 0, cfg=cfg)
+                    day_pnl_usd=day_pnl, day_pnl_pct=100 * day_pnl / day0_eq if day0_eq > 0 else 0, peak=L.peak, cfg=cfg)
 
     def check(self, positions, sym, d, weight, unreal_usd=0.0, now=None):
         """-> (ok, reason, risk_usd). positions: {bot_id: {sym, dir, risk_usd}}"""

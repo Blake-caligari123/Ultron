@@ -14,11 +14,10 @@ Loop (alternating XAUUSD / BTCUSD):
   * REBALANCE the allocator whenever the roster changes; signal ultron.live via results/roster_changed.
 Stats for the floor view: results/breeder_stats.json."""
 import json, os, sys, time, signal, hashlib
-from collections import deque
+from collections import deque, Counter
 import numpy as np, pandas as pd
-from .db import connect, ROOT, FLOOR, rfile
-from .engine import random_genome, mutate, crossover, metrics, FAMILIES, gkey, describe, signature, indicators_text, rr, LEVEL_FAMS, rr_fix
-from collections import Counter
+from .db import connect, FLOOR, rfile, write_json, read_json, SYMBOLS
+from .engine import random_genome, mutate, crossover, metrics, FAMILIES, gkey, describe, signature, LEVEL_FAMS, rr_fix
 from . import evolve as ev
 from .learn import LiveCtx, live_stats, KILL, now_s
 from .risk import load_cfg
@@ -82,7 +81,9 @@ CODE_HASH = code_hash()        # taken when this process imported its modules
 HKEY = "R"     # holdout / sealed gates use raw R after costs (what live earns), not the drift-adjusted fitness metric (review B3)
 BATCH = 24; POOL = 60; DUTY = 0.5 if FLOOR == "main" else 0.4     # DUTY: fraction of wall time spent computing (rest sleeping)
 RELOAD_S = 1800; KILL_EVERY_S = 20; REGATE_EVERY_S = 600; STATS = rfile("breeder_stats.json")
-POOLF = rfile("breeder_pool.json"); N_RANDOM = 60; LOG_FRAC = 0.35; LOG_KEEP_S = 3 * 86400; LESSONS_EVERY_S = 600                    # random bots per symbol for the "vs random" comparison
+POOLF = rfile("breeder_pool.json")
+N_RANDOM = 60                 # random bots per symbol for the "vs random" comparison
+LOG_FRAC = 0.35; LOG_KEEP_S = 3 * 86400; LESSONS_EVERY_S = 600
 
 def syd_day(): return pd.Timestamp.now(tz="Australia/Sydney").strftime("%Y-%m-%d")
 
@@ -90,14 +91,14 @@ class Breeder:
     def __init__(self):
         self.db = connect(); self.rng = np.random.default_rng(int(time.time()))
         self.ctx = {}; self.loaded = {}; self.win = {}
-        self.pool = {"XAUUSD": [], "BTCUSD": []}          # [(fit, genome)] elite pool per symbol
-        try:
-            for s, lst in json.load(open(POOLF)).items(): self.pool[s] = [(f, g) for f, g in lst]
-        except Exception: pass
+        self.pool = {s: [] for s in SYMBOLS}          # [(fit, genome)] elite pool per symbol
+        for s, lst in (read_json(POOLF) or {}).items(): self.pool[s] = [(f, g) for f, g in lst]
         for tb in ("held_tested", "sealed_tested"):
             self.db.execute(f"CREATE TABLE IF NOT EXISTS {tb}(gh TEXT, wend TEXT, sym TEXT, ts INTEGER, passed INTEGER, PRIMARY KEY(gh, wend))")
         self.db.commit()
-        self.held_tested = set(); self.meta = {}; self.seen_today = set()     # seen_today: hashes of distinct genomes tested today           # bot_id -> cached hist fit / held t / vol
+        self.held_tested = set()      # (sym, genome) already sent to the selection holdout today
+        self.meta = {}                # bot_id -> cached train fit / holdout metrics / daily R / vol
+        self.seen_today = set()       # hashes of distinct genomes tested today
         self.promos = deque(); self.tested_hour = deque()
         for (ts,) in self.db.execute("SELECT added_ts FROM live_bots WHERE origin='breeder' ORDER BY added_ts"):   # hourly cap survives restarts
             t = pd.Timestamp(ts).timestamp()
@@ -105,12 +106,10 @@ class Breeder:
         self.gen = int(self.db.execute("SELECT MAX(gen) FROM generations").fetchone()[0] or 0)
         mx = self.db.execute("SELECT MAX(born_gen) FROM bots WHERE origin IN ('live-child','breeder')").fetchone()[0]
         self.gen = max(self.gen, int(mx or 0))
-        self.stats = dict(day=syd_day(), tested_today=0, promoted_today=0, cut_today=0, gate_today={}); old = {}
-        try:
-            old = json.load(open(STATS))
-            if old.get("day") == self.stats["day"]:
-                for k in ("tested_today", "promoted_today", "cut_today", "gate_today"): self.stats[k] = old.get(k, self.stats[k])
-        except Exception: pass
+        self.stats = dict(day=syd_day(), tested_today=0, promoted_today=0, cut_today=0, gate_today={})
+        old = read_json(STATS) or {}
+        if old.get("day") == self.stats["day"]:
+            for k in ("tested_today", "promoted_today", "cut_today", "gate_today"): self.stats[k] = old.get(k, self.stats[k])
         self.rej = deque(); self.hb = {}; self.rej_today = Counter(old.get("reject_today", {}) if old.get("day") == self.stats["day"] else {})
         self.last_regate = 0.0
         self.started = time.time(); self.busy = 0.0; self.last_kill = 0; self.rand = {}; self.last_lessons = 0
@@ -180,11 +179,11 @@ class Breeder:
         changed = False; K = GUARDS["kill"]
         for bid, sym, g, st, n, r, dd, added in self.roster():
             why = None
-            if True:
-                m = metrics(live_stats(self.db, bid))
-                if n >= K["min_n"] and r <= K["net_r"]: why = f"lost {r:.1f}R live (limit {K['net_r']}R)"
-                elif dd <= K["dd_r"]: why = f"live drawdown {dd:.1f}R (limit {K['dd_r']}R)"
-                elif n >= K["pf_n"] and m["pf"] < K["pf"]: why = f"live profit factor {m['pf']} after {n} trades"
+            if n >= K["min_n"] and r <= K["net_r"]: why = f"lost {r:.1f}R live (limit {K['net_r']}R)"
+            elif dd <= K["dd_r"]: why = f"live drawdown {dd:.1f}R (limit {K['dd_r']}R)"
+            elif n >= K["pf_n"]:
+                pf = metrics(live_stats(self.db, bid))["pf"]           # only query trades when the PF rule can apply
+                if pf < K["pf"]: why = f"live profit factor {pf} after {n} trades"
             if why:
                 self.cut(bid, sym, why); changed = True
             elif st == "probation":
@@ -243,7 +242,6 @@ class Breeder:
 
     def breed(self, sym):
         ctx = self.get_ctx(sym); w = self.win[sym]; rng = self.rng
-        live = [json.loads(g) for b, s, g, *_ in self.roster() if s == sym]
         kids = []; orig = []
         for _ in range(BATCH):
             u = rng.random()
@@ -295,14 +293,14 @@ class Breeder:
         for fit, k in cands:
             self.held_tested.add((sym, gkey(k))); gt["fit"] += 1; self.mark_tested("held_tested", sym, k, wend)
             self._why = None
-            stage = self._gate_one(sym, k, fit, hm_box := {}, roster, gt, G, gh, ctx, w)
+            stage = self._gate_one(sym, k, fit, roster, gt, G, gh, ctx, w)
             if stage != "promoted": self.reject(self._why or stage)
             self.db.execute("INSERT INTO gate_log VALUES(?,?,?,?,?)", (int(time.time()), sym, k["fam"], k["tf"], stage))
             if stage == "promoted": changed = True
         self.db.commit()
         return changed
 
-    def _gate_one(self, sym, k, fit, _box, roster, gt, G, gh, ctx, w):
+    def _gate_one(self, sym, k, fit, roster, gt, G, gh, ctx, w):
         """Runs one candidate through the gate; returns the furthest stage it reached ('fit' = failed plateau)."""
         ok, med = ev.plateau_ok(ctx, k, fit, self.rng, w["train"], k=6)
         if "plateau_slack" in G: ok = med >= fit - G["plateau_slack"] * max(1.0, abs(fit))     # scalp: nudged settings must not collapse
@@ -390,7 +388,7 @@ class Breeder:
     def save_stats(self):
         if self.stats["day"] != syd_day():
             self.stats.update(day=syd_day(), tested_today=0, promoted_today=0, cut_today=0, gate_today={})
-            self.held_tested.clear(); self.seen_today.clear()   # in-memory only; the persisted held_tested/sealed_tested tables are kept; self.rej_today.clear()
+            self.held_tested.clear(); self.seen_today.clear(); self.rej_today.clear()   # in-memory only; the persisted held_tested/sealed_tested tables are kept
         now = time.time()
         while self.tested_hour and now - self.tested_hour[0] > 3600: self.tested_hour.popleft()
         up = now - self.started
@@ -403,24 +401,24 @@ class Breeder:
                  top_reject=(top[0][0] if top else None), top_reject_share=(round(100 * top[0][1] / max(sum(rh.values()), 1)) if top else None), expected_trades_per_day=tpd, expected_trades_per_hour=round(sum(tpd.values()) / 24, 2), running_s=int(up), tested_last_hour=len(self.tested_hour), generation=self.gen,
                  cpu_duty=round(self.busy / max(up, 1), 3), guards=GUARDS, pool_best={k: (round(v[0][0], 2) if v else None) for k, v in self.pool.items()},
                  windows=self.win)
-        tmp = STATS + ".tmp"; json.dump(s, open(tmp, "w")); os.replace(tmp, STATS)
+        write_json(STATS, s)
         if now - self.last_lessons > LESSONS_EVERY_S and now - self.started > 120:
             self.last_lessons = now
             try:
                 self.db.execute("DELETE FROM cand_log WHERE ts<?", (int(now - LOG_KEEP_S),)); self.db.execute("DELETE FROM gate_log WHERE ts<?", (int(now - LOG_KEEP_S),))
                 n = learned.record_lessons(self.db, learned.compute(rfile("ultron.db"), FLOOR)); print(now_s(), "lessons +", n, flush=True)
             except Exception as e: print(now_s(), "lessons error", e, flush=True)
-        json.dump({k: v for k, v in self.pool.items()}, open(POOLF + ".tmp", "w")); os.replace(POOLF + ".tmp", POOLF)
+        write_json(POOLF, self.pool)
 
     def run(self):
         print(now_s(), "breeder start; floor", FLOOR, "code", CODE_HASH, "guards", json.dumps(GUARDS), flush=True)
-        for sym in ("XAUUSD", "BTCUSD"): self.get_ctx(sym)
+        for sym in SYMBOLS: self.get_ctx(sym)
         self.backfill_evidence()
         changed = True; i = 0
         while True:
             if code_hash() != CODE_HASH:      # code changed on disk since start: exit so run.sh respawns us on the new code
                 print(now_s(), "code changed on disk (hash", CODE_HASH, "->", code_hash() + "); exiting rc=3 for a respawn", flush=True); sys.exit(3)
-            for sym in ("XAUUSD", "BTCUSD"):
+            for sym in SYMBOLS:
                 t0 = time.time()
                 if time.time() - self.last_kill > KILL_EVERY_S:
                     changed |= self.kill_check(); self.last_kill = time.time()

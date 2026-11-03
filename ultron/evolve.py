@@ -1,6 +1,7 @@
 """Phase-1 research run: island evolution on TRAIN, survivors gated on VALID + walk-forward + plateau,
 allocator, sealed HOLDOUT evaluated once, random-genome noise floor, walk-forward test of the whole process."""
-import json, time, uuid, sys, os
+import json, time, sys, os
+from collections import OrderedDict
 import numpy as np, pandas as pd
 from .market import load
 from .engine import (Ind, random_genome, mutate, crossover, gkey, run, metrics, describe, FAMILIES, COMMON, FAM)
@@ -20,14 +21,20 @@ KEY = "Ra"   # decisions (fitness, gates, WF, allocator) use drift-adjusted R; r
 REASON = {0: "stop", 1: "target", 2: "time", 3: "flip", 4: "window_end"}
 
 class Ctx:
-    def __init__(self, sym):
-        self.sym = sym; self.mk = load(sym); self.inds = {k: Ind(self.mk.tf[k]) for k in self.mk.tf}; self.cache = {}
+    """One market + its indicator caches + a least-recently-used cache of backtests keyed by (genome, window)."""
+    BT_CACHE = 4000
+    def __init__(self, sym, mk=None):
+        self.sym = sym; self.mk = mk if mk is not None else load(sym)
+        self.inds = {k: Ind(self.mk.tf[k]) for k in self.mk.tf}; self.cache = OrderedDict()
     def bt(self, g, w):
-        k = (gkey(g), w)
-        if k not in self.cache:
-            if len(self.cache) > 2500: self.cache.clear()
-            self.cache[k] = run(g, self.mk, self.inds, *w)
-        return self.cache[k]
+        k = (gkey(g), tuple(w))
+        r = self.cache.get(k)
+        if r is None:
+            r = self.cache[k] = run(g, self.mk, self.inds, *w)
+            if len(self.cache) > self.BT_CACHE: self.cache.popitem(last=False)
+        else:
+            self.cache.move_to_end(k)
+        return r
 
 def year_split_fitness(r, w, min_n, folds=None):
     R = r[KEY]; n = len(R)

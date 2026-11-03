@@ -33,7 +33,7 @@ def _supertrend(h, l, c, at, k):
     return d
 
 def state(ind, k, n):
-    t = ind.t; o, h, l, c = t["o"], t["h"], t["l"], t["c"]
+    t = ind.t; h, l, c = t["h"], t["l"], t["c"]
     with np.errstate(invalid="ignore", divide="ignore"):
         if k == 0:
             r = ind.get("rsi", n); return _band(r, 55.0, 45.0)

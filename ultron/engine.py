@@ -1,5 +1,5 @@
 """Indicators, intraday strategy genome -> signals, numba trade simulator (with MAE), metrics.
-Timeframes: 0=1m, 1=5m, 2=15m. Max holding time is a gene in hours."""
+Timeframes: 0=1m, 1=5m, 2=15m, 3=30m. Max holding time is a gene in hours."""
 import numpy as np, pandas as pd
 from numba import njit
 
@@ -33,31 +33,44 @@ def _anchored_twap(h, l, c, ts, anchor_h):
     return out
 
 class Ind:
-    """per-(market,tf) indicator cache (bounded: 1m arrays are ~10 MB each)"""
-    def __init__(self, t, cap=40):
-        self.t = t; self.cache = {}; self.cap = cap
+    """Per-(market, tf) indicator cache: least-recently-used, bounded by bytes rather than entry count.
+    Indicator STATES are int8 (1 byte/bar) and floats are 8 bytes/bar, so a byte budget keeps ~8x more of the states the
+    combo genes reuse than a fixed entry cap did (that cap thrashed: every GA batch recomputed the same rolling windows).
+    ATR and the ATR ratio are used by every bot and are never evicted."""
+    PINNED = ("atr", "atr_ratio")
+    def __init__(self, t, budget_mb=256):
+        from collections import OrderedDict
+        self.t = t; self.cache = OrderedDict(); self.budget = int(budget_mb * 2**20); self.bytes = 0
+    def _put(self, k, v):
+        nb = getattr(v, "nbytes", 0)
+        while self.bytes + nb > self.budget:
+            old = next((kk for kk in self.cache if kk[0] not in self.PINNED), None)
+            if old is None: break
+            self.bytes -= getattr(self.cache.pop(old), "nbytes", 0)
+        self.cache[k] = v; self.bytes += nb
     def get(self, name, *p):
         k = (name,) + p
         v = self.cache.get(k)
-        if v is None:
-            t = self.t
-            if name == "atr": v = atr(t["h"], t["l"], t["c"], 14)
-            elif name == "atr_ratio":
-                a = self.get("atr"); v = a / pd.Series(a).rolling(500, min_periods=50).mean().values
-            elif name == "ema": v = ema(t["c"], p[0])
-            elif name == "hh": v = pd.Series(t["h"]).rolling(p[0]).max().shift(1).values
-            elif name == "ll": v = pd.Series(t["l"]).rolling(p[0]).min().shift(1).values
-            elif name == "z":
-                s = pd.Series(t["c"]); m = s.rolling(p[0]).mean(); sd = s.rolling(p[0]).std()
-                v = ((s - m) / sd).values
-            elif name == "rsi": v = rsi(t["c"], p[0])
-            elif name == "twap": v = _anchored_twap(t["h"], t["l"], t["c"], t["ts"], p[0])
-            elif name == "mom": c = t["c"]; v = c - np.r_[np.full(p[0], np.nan), c[:-p[0]]]
-            elif name == "st":
-                from . import indicators; v = indicators.state(self, p[0], p[1])
-            if len(self.cache) >= self.cap:
-                for kk in [kk for kk in self.cache if kk[0] not in ("atr", "atr_ratio")][: self.cap // 2]: self.cache.pop(kk)
-            self.cache[k] = v
+        if v is not None:
+            self.cache.move_to_end(k); return v
+        t = self.t
+        if name == "atr": v = atr(t["h"], t["l"], t["c"], 14)
+        elif name == "atr_ratio":
+            a = self.get("atr"); v = a / pd.Series(a).rolling(500, min_periods=50).mean().values
+        elif name == "ema": v = ema(t["c"], p[0])
+        elif name == "hh": v = pd.Series(t["h"]).rolling(p[0]).max().shift(1).values
+        elif name == "ll": v = pd.Series(t["l"]).rolling(p[0]).min().shift(1).values
+        elif name == "z":
+            s = pd.Series(t["c"]); m = s.rolling(p[0]).mean(); sd = s.rolling(p[0]).std()
+            v = ((s - m) / sd).values
+        elif name == "rsi": v = rsi(t["c"], p[0])
+        elif name == "twap": v = _anchored_twap(t["h"], t["l"], t["c"], t["ts"], p[0])
+        elif name == "mom": c = t["c"]; v = c - np.r_[np.full(p[0], np.nan), c[:-p[0]]]
+        elif name == "st":
+            from . import indicators; v = indicators.state(self, p[0], p[1])
+        else:
+            raise KeyError(f"unknown indicator {name!r}")
+        self._put(k, v)
         return v
 
 # ---------------- genome ----------------

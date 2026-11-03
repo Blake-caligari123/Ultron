@@ -6,11 +6,11 @@
    + correlation check vs roster. Max 2 promotions/day so the held-out window isn't over-queried.
 5) allocator: rebalance weights across the roster.
 Usage: python -m ultron.learn [--seed]  (--seed loads the latest research run's survivors into an empty roster)"""
-import json, os, sys, time
+import json, sys, time
 import numpy as np, pandas as pd
-from .db import connect, ROOT
-from .market import Market
-from .engine import Ind, random_genome, mutate, crossover, run, metrics, FAMILIES, gkey, describe
+from .db import connect, rfile
+from .market import Market, load_history
+from .engine import random_genome, mutate, crossover, metrics, FAMILIES, describe
 from . import evolve as ev
 
 MAX_PER_SYM = 8; MAX_PROMOTE = 2; HELD_DAYS = 180
@@ -20,12 +20,9 @@ CAP = 0.25
 def now_s(): return time.strftime("%Y-%m-%dT%H:%M:%S%z")
 
 class LiveCtx(ev.Ctx):
+    """Backtest context on the full history plus the live floor's recent 1m bars."""
     def __init__(self, sym):
-        df = pd.read_pickle(os.path.join(ROOT, "data", f"{sym}_m1.pkl"))
-        lp = os.path.join(ROOT, "data", f"{sym}_m1_live.pkl")
-        if os.path.exists(lp):
-            df = pd.concat([df, pd.read_pickle(lp)]); df = df[~df.index.duplicated(keep="last")].sort_index()
-        self.sym = sym; self.mk = Market(sym, df); self.inds = {k: Ind(self.mk.tf[k]) for k in self.mk.tf}; self.cache = {}
+        super().__init__(sym, Market(sym, load_history(sym)))
 
 def seed(db):
     run_id = db.execute("SELECT run_id FROM runs WHERE kind='phase1_research' AND summary IS NOT NULL ORDER BY started DESC LIMIT 1").fetchone()[0]
@@ -53,8 +50,7 @@ def tick(db, rng):
     for bid, sym, g, st, n, r, dd in roster:
         R = live_stats(db, bid); m = metrics(R)
         why = None
-        if why: pass
-        elif n >= KILL["min_n"] and r <= KILL["net_r"]: why = f"live net {r:.1f}R"
+        if n >= KILL["min_n"] and r <= KILL["net_r"]: why = f"live net {r:.1f}R"
         elif dd <= KILL["dd_r"]: why = f"live drawdown {dd:.1f}R"
         elif n >= KILL["pf_n"] and m["pf"] < KILL["pf"]: why = f"live PF {m['pf']}"
         if why:
@@ -124,7 +120,7 @@ def tick(db, rng):
         db.execute("INSERT INTO allocations VALUES(?,?,?,?,?,?)", ("live", now_s(), b, scores[b]["sym"], float(x), "blended (hist+held+live t) / held vol, cap 25%, probation x0.5"))
     db.execute("INSERT INTO live_events VALUES(?,?,?,?)", (now_s(), "rebalance", None, json.dumps({str(b): round(float(x), 3) for b, x in zip(ids, w)})))
     db.commit()
-    open(os.path.join(ROOT, "results", "roster_changed"), "w").write(now_s())
+    open(rfile("roster_changed"), "w").write(now_s())
     print(now_s(), "learn tick: roster", len(ids), "promoted", promoted, flush=True)
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
 """'What Ultron learned': plain-English findings computed ONLY from logged evolution data (cand_log = random sample of every
 tested candidate, gate_log = every gate run, live_bots/live_trades = what happened on the paper floor). Every claim carries
 its numbers. Thresholds for making a claim are fixed below; if the data doesn't clear them, no claim is made."""
-import json, sqlite3, time, re
-import numpy as np, pandas as pd
+import json, sqlite3, time
+import pandas as pd
 from .engine import FAMILIES, TF_NAME
 from . import plain
 
@@ -47,6 +47,9 @@ def compute(path, floor="main", hours=24):
     bots = pd.read_sql("SELECT bot_id, symbol, family, status, genome, added_ts, removed_ts, reason, live_n, live_r FROM live_bots WHERE status!='retired'", c)
     tr = pd.read_sql("SELECT bot_id, r, risk_usd, weight, cost_usd FROM live_trades", c)
     c.close()
+    # $ result per bot (same rule as risk.trade_usd: old rows without risk_usd use weight x 5% x $10k)
+    usd = tr["r"] * tr["risk_usd"].where(tr["risk_usd"].notna(), tr["weight"].fillna(0) * 500)
+    prof = usd.groupby(tr["bot_id"]).sum().to_dict() if len(tr) else {}
     claims = []; out = dict(floor=floor, hours=hours, sample=int(len(df)), since=since, markets={}, kills={}, shifts={}, claims=claims)
     if len(df):
         df["tfn"] = df["tf"].map(TF_NAME); df["sess"] = [sess(a, b) for a, b in zip(df["ss"], df["slen"])]
@@ -92,10 +95,6 @@ def compute(path, floor="main", hours=24):
             if len(g2):
                 m["gate"] = dict(runs=int(len(g2)), passed_holdout=int(g2["stage"].isin(PAST).sum()), promoted=int((g2["stage"] == "promoted").sum()))
         b = bots[bots["symbol"] == sym]
-        prof = {}
-        for _, t in tr.iterrows():
-            u = t["r"] * t["risk_usd"] if pd.notna(t["risk_usd"]) else t["r"] * (t["weight"] or 0) * 500
-            prof[t["bot_id"]] = prof.get(t["bot_id"], 0) + u
         fams = []
         for f, g in b.groupby("family"):
             fams.append(dict(family=plain.FAM_NAME.get(f, f), alive=int(g["status"].isin(["live", "probation"]).sum()), cut=int((g["status"] == "killed").sum()),
@@ -104,7 +103,7 @@ def compute(path, floor="main", hours=24):
         out["markets"][sym] = m
         # trait shift over time: hourly buckets of the best 10% per market
         if len(d_all):
-            d = d_all.assign(bucket=(d["ts"] // 3600) * 3600); ser = []
+            d = d_all.assign(bucket=(d_all["ts"] // 3600) * 3600); ser = []
             for bk, g in d.groupby("bucket"):
                 if len(g) < 50: continue
                 t10 = g[g["fit"] >= g["fit"].quantile(0.9)]

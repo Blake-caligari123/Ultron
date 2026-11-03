@@ -68,3 +68,21 @@ Gates unchanged, including "must beat 75% of random bots on the unseen 6 months"
 Every batch prints `HB <floor> <sym> gen .. batch .. new .. best_fit .. | last hour tested .. | rejects <top 3 reasons>` to
 logs/breed*.log. Reject reasons (plain words) are in breeder_stats (`reject_last_hour`, `reject_today`, `top_reject`) and on the
 floor status line: "Breeding: tested N in the last hour · top reject reason: X".
+
+## Development
+* Setup: `uv sync` (creates `.venv`, installs the package from `./ultron` plus pytest). Run anything as `.venv/bin/python -m ultron.<module>`.
+* Tests: `.venv/bin/python -m pytest` — synthetic data only, no network, runs in an isolated temporary `ULTRON_HOME`.
+* `ULTRON_HOME` (default: the repo root) holds the runtime state: `data/`, `results/`, `logs/`, and optionally `config/`
+  (falls back to the repo's `config/`). Point it somewhere else to run an isolated copy against its own data.
+* Floor view API (read-only, gzip, cached ~2 s per floor): `api/state`, `api/results`, `api/learned` (each `?floor=main|scalp`),
+  `api/replay` (research run) and `api/health` (are the live floor and breeder of each floor reporting?).
+
+## Performance notes (Nov 2026 overhaul)
+* Floor view: closed trades are read incrementally into memory (only new rows per poll); `api/state` went from ~490 ms / 1.8 MB to
+  ~20 ms / ~110 KB on a floor with 40k trades, and the page no longer downloads every killed bot and an unused equity series.
+* Risk manager: equity / peak / day P&L come from an incremental ledger instead of rescanning `live_trades` on every check.
+* Live floor: each bar close builds only the timeframes that are due. Indicator-family bots run on a trimmed tail of history
+  (`market.live_tail`), proven signal-identical to full history by `tests/test_market.py`; a main-floor 1m close went from ~100 ms to ~15 ms.
+* Level families (Scalp Pit) keep the full 20-day live window. Their setups stay armed on a level across chained entries, so their
+  signals have no bounded look-back: live (20 days of history) and the backtest (years) can disagree on long-running setups.
+  This was already true before the overhaul; `tests/test_market.py::test_level_families_need_full_window` documents it.

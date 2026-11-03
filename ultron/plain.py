@@ -22,7 +22,6 @@ def hh(h_utc):
     return f"{(h % 12) or 12}{'am' if h < 12 else 'pm'}"
 
 def _special(g, sym):
-    from .engine import indicators_text, rr
     from .levels import LEVEL_NAMES
     from . import indicators
     a = ASSET[sym]; f = g["fam"]
@@ -56,7 +55,7 @@ def _describe(g, sym):
     a = ASSET[sym]; tf = TF_MIN[g["tf"]]; f = g["fam"]; L = dur(g["p1"] * tf) if f in (0, 1, 6) else ""
     R = dur(g.get("p2", 0)) if f == 3 else ""; H = hh(g["p1"]) if f == 3 else ""
     buy, sell = {
-        0: (f"buys when {a} breaks above its highest price of the last {L}", f"sells when it breaks below the lowest"),
+        0: (f"buys when {a} breaks above its highest price of the last {L}", "sells when it breaks below the lowest"),
         1: (f"buys when {a} falls unusually far below its {L} average, betting on a bounce", "sells after unusual spikes"),
         2: (f"buys when {a}'s short-term trend turns up", "sells when it turns down"),
         3: (f"marks {a}'s price range in the first {R} after {H} Sydney time, then buys a break above it", "sells a break below it"),
