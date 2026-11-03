@@ -91,10 +91,13 @@ class RiskManager:
         if self.floor_dd_pct(unreal_usd) <= -float(lim): self.dd_halted = True
         return self.dd_halted
 
-    def risk_usd_for(self, weight, equity):
-        rp = load_cfg()["risk_per_trade"]
+    def risk_usd_for(self, weight, equity, live_n=None):
+        c = load_cfg(); rp = c["risk_per_trade"]
         if (weight or 0) <= 0: return 0.0              # weight 0 = switched off by the allocator: no risk, no trade (min_pct is NOT applied)
         pct = min(rp["max_pct"], max(rp["min_pct"], (weight or 0) * rp["pct_per_unit_weight"]))
+        pb = c.get("probation_risk", {"min_live_trades": 30, "risk_mult": 0.25})
+        if live_n is not None and live_n < pb["min_live_trades"]:     # new bots trade small until they have a live record
+            pct = max(rp["min_pct"], pct * pb["risk_mult"])
         return equity * pct / 100
 
     def snapshot(self, positions, unreal_usd=0.0, now=None):
@@ -106,12 +109,12 @@ class RiskManager:
         return dict(equity=eq, open_risk_usd=open_risk, open_risk_pct=100 * open_risk / eq if eq > 0 else 0, open_trades=len(positions),
                     day_pnl_usd=day_pnl, day_pnl_pct=100 * day_pnl / day0_eq if day0_eq > 0 else 0, peak=L.peak, cfg=cfg)
 
-    def check(self, positions, sym, d, weight, unreal_usd=0.0, now=None):
+    def check(self, positions, sym, d, weight, unreal_usd=0.0, now=None, live_n=None):
         """-> (ok, reason, risk_usd). positions: {bot_id: {sym, dir, risk_usd}}"""
         s = self.snapshot(positions, unreal_usd, now); c = s["cfg"]; now = now or time.time()
         day = syd_day_start(now)
         if self.block_day != day: self.block_day = day; self.blocked_today = 0
-        risk = self.risk_usd_for(weight, s["equity"])
+        risk = self.risk_usd_for(weight, s["equity"], live_n)
         if risk <= 0:
             return False, "allocator weight is 0 (bot switched off)", 0.0
         if not self.dd_halted and self.dd_kill_hit(unreal_usd):

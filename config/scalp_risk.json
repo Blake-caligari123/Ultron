@@ -3,6 +3,8 @@
   "equity_start_usd": 10000,
   "risk_per_trade": {"pct_per_unit_weight": 5.0, "min_pct": 0.1, "max_pct": 0.5,
                      "_comment": "risk per trade (% of current paper equity) = allocator weight x 5, clamped to 0.1%..0.5%"},
+  "probation_risk": {"min_live_trades": 30, "risk_mult": 0.25,
+                     "_comment": "bots with fewer than 30 live paper trades risk 0.25x their normal per-trade risk (not below min_pct)"},
   "max_total_open_risk_pct": 3.0,
   "max_open_trades": 10,
   "max_same_direction_per_symbol": 3,

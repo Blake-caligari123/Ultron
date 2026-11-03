@@ -1,5 +1,5 @@
 """Tests run against an isolated ULTRON_HOME (temp dir) so they never touch real data/, results/ or config/."""
-import os, sys, tempfile, shutil
+import os, tempfile, shutil
 HOME = tempfile.mkdtemp(prefix="ultron_test_home_")
 os.environ["ULTRON_HOME"] = HOME
 os.environ.setdefault("NUMBA_NUM_THREADS", "1")

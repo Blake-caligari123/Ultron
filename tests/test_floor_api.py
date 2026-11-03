@@ -40,6 +40,15 @@ def test_results_and_learned(client):
     assert sum(b["live"]["trades"] for b in r["promoted"] + r["killed"]) == 50
     assert client.get("/api/learned?floor=main").status_code == 200
 
+def test_heartbeat_staleness(client):
+    s = client.get("/api/state?floor=main").json()
+    assert s["stale"] is True and s["heartbeat_age_s"] is None                # no heartbeat written yet
+    db = connect(rfile("ultron.db", "main"))
+    db.execute("INSERT INTO live_events VALUES(?,?,?,?)", (time.strftime("%Y-%m-%dT%H:%M:%S%z"), "heartbeat", None, "{}")); db.commit()
+    import ultron.floor as F; F._cache.clear()
+    s = client.get("/api/state?floor=main").json()
+    assert s["stale"] is False and s["heartbeat_age_s"] < 60
+
 def test_scalp_floor_empty_and_health(client):
     s = client.get("/api/state?floor=scalp").json()
     assert s["floor"] == "scalp" and s["summary"]["bots_alive"] == 0 and s["curve"] == []

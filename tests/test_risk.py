@@ -43,3 +43,10 @@ def test_daily_loss_halts_new_entries(db):
     rm = RiskManager(db); ok, why, _ = rm.check({}, "BTCUSD", 1, 0.05)
     assert not ok and why.startswith("daily floor loss limit") and why.endswith("|FIRST")
     ok, why, _ = rm.check({}, "BTCUSD", 1, 0.05); assert not ok and not why.endswith("|FIRST")
+
+def test_probation_risk_until_30_live_trades(db):
+    rm = RiskManager(db)
+    full = rm.check({}, "XAUUSD", 1, 0.05)[2]                                  # no live_n: normal size (0.5%)
+    small = rm.check({}, "XAUUSD", 1, 0.05, live_n=3)[2]                       # new bot: 0.25x, floored at min_pct 0.25%
+    assert full == pytest.approx(50.0) and small == pytest.approx(25.0)
+    assert rm.check({}, "XAUUSD", 1, 0.05, live_n=30)[2] == pytest.approx(full)

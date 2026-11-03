@@ -153,6 +153,8 @@ def build_state(floor):
         recent = q(f"""SELECT bot_id, symbol, entry_ts, exit_ts, dir, entry, exit, r, reason, weight, risk_usd, cost_usd, {USD_SQL} usd
                        FROM live_trades ORDER BY exit_ts DESC, id DESC LIMIT ?""", (TRADES_SHOWN + (100 if retired else 0),))
         events = q("SELECT ts, kind, bot_id, detail FROM live_events WHERE kind!='heartbeat' ORDER BY rowid DESC LIMIT ?", (EVENTS_SHOWN,))
+        hb = q.one("SELECT ts, detail FROM live_events WHERE kind='heartbeat' ORDER BY rowid DESC LIMIT 1")      # live trader writes one every 5 min
+    hb_age = (now - pd.Timestamp(hb["ts"]).timestamp()) if hb else None
     if retired:
         rs = set(retired); recent = [t for t in recent if t["bot_id"] not in rs][:TRADES_SHOWN]
     mask = ~np.isin(A["bot_id"], retired) if retired else np.ones(len(A["id"]), bool)
@@ -198,7 +200,8 @@ def build_state(floor):
                    costs_paid_usd=round(cost, 2), costs_paid_today_usd=round(tot["cost_today"], 2),
                    gross_before_costs_usd=round(realised + cost, 2))
     return dict(now=int(now), floor=floor, ticks=ticks, bots=bots, killed=killed, trades=recent, events=events, curve=curve,
-                last_event=events[0]["ts"] if events else None, summary=summary,
+                last_event=events[0]["ts"] if events else None, last_heartbeat=hb["ts"] if hb else None,
+                heartbeat_age_s=(int(hb_age) if hb_age is not None else None), stale=hb_age is None or hb_age > 600, summary=summary,
                 paper=dict(start_equity=START, risk_budget_pct=BUDGET_PCT, note="PAPER only. No broker, no orders."))
 
 @app.get("/api/state")

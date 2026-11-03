@@ -50,3 +50,20 @@ def test_bar_close_only_on_completed_tf_bars(floor, monkeypatch):
     five_done = (last + 60) % 300 == 0
     assert (1, last) in calls and any(c[0] == 2 for c in calls) == five_done
     calls.clear(); floor.on_bar_close("BTCUSD"); assert calls == []           # same bars never evaluated twice
+
+def test_gold_market_hours():
+    import calendar
+    ts = lambda s: calendar.timegm(time.strptime(s, "%Y-%m-%d %H:%M"))
+    assert L.gold_open(ts("2026-11-04 10:00"))                                # Wednesday
+    assert not L.gold_open(ts("2026-11-04 21:30"))                            # daily break
+    assert not L.gold_open(ts("2026-11-07 12:00"))                            # Saturday
+    assert not L.gold_open(ts("2026-11-08 22:00")) and L.gold_open(ts("2026-11-08 23:30"))   # Sunday reopen
+
+def test_probation_counter_increments_on_close(floor):
+    g = random_genome(np.random.default_rng(4)); g.update(fam=2)
+    add_bot(floor, 9, "BTCUSD", g)
+    floor.quote["BTCUSD"] = dict(bid=70000.0, ask=70000.0, ts=int(time.time()))
+    floor.open(floor.bots[9], 1, 70000.0, 100.0, int(time.time()), 60)
+    assert floor.pos[9]["risk_usd"] == pytest.approx(25.0)                     # new bot trades at probation size
+    floor.check_exits("BTCUSD", 70000.0, 69000.0, int(time.time()) + 60)
+    assert floor.bots[9]["n"] == 1
