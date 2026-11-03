@@ -1,0 +1,15 @@
+{
+  "_comment": "SCALP PIT (experimental) floor-wide PAPER risk limits. Separate $10k paper account. Read by ultron/risk.py when ULTRON_FLOOR=scalp.",
+  "equity_start_usd": 10000,
+  "risk_per_trade": {"pct_per_unit_weight": 5.0, "min_pct": 0.1, "max_pct": 0.5,
+                     "_comment": "risk per trade (% of current paper equity) = allocator weight x 5, clamped to 0.1%..0.5%"},
+  "max_total_open_risk_pct": 3.0,
+  "max_open_trades": 10,
+  "max_same_direction_per_symbol": 3,
+  "daily_floor_loss_limit_pct": 4.0,
+  "daily_reset": "midnight Australia/Sydney",
+  "max_floor_drawdown_pct": 10.0,
+  "equity_reset_ts": 0,
+  "max_bots_on_floor": 30,
+  "blocked_event_throttle_s": 600
+}

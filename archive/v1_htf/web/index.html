@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#07090d"><meta name="apple-mobile-web-app-capable" content="yes">
+<title>ULTRON · trading floor</title>
+<link rel="stylesheet" href="static/style.css">
+</head><body>
+<header>
+  <div class="brand"><h1>ULTRON</h1><div class="tag">Ultron reigns supreme</div></div>
+  <div class="status"><span id="mode" class="pill">LOADING</span><span class="pill paper">PAPER · no broker</span></div>
+  <div class="tickers"><span id="tk-XAUUSD">XAUUSD —</span><span id="tk-BTCUSD">BTCUSD —</span></div>
+</header>
+<nav class="tabs" id="tabs"><button data-s="XAUUSD" class="on">XAUUSD</button><button data-s="BTCUSD">BTCUSD</button>
+  <span class="sp"></span><button id="btn-replay">↺ Replay</button><button id="btn-live">● Live</button></nav>
+<section class="card"><div class="ct"><b id="floor-title">Trading floor</b><span id="floor-sub" class="mut"></span></div>
+  <canvas id="floor"></canvas>
+  <div class="legend" id="legend"></div></section>
+<section class="card"><div class="ct"><b>Evolution timeline</b><span class="mut">best / median train fitness per generation · 4 islands</span></div><canvas id="timeline"></canvas></section>
+<section class="card"><div class="ct"><b>Equity</b><span class="mut" id="eq-sub">survivors, cumulative R · <i class="k tr">train</i> <i class="k va">valid</i> <i class="k ho">sealed holdout</i> <i class="k lv">live paper</i></span></div><canvas id="equity"></canvas></section>
+<section class="card"><div class="ct"><b>Survivors</b><span class="mut">in-sample vs out-of-sample (1% risk per trade)</span></div><div id="surv"></div><div id="gates" class="mut small"></div></section>
+<section class="card"><div class="ct"><b>Floor feed</b><span class="mut">births · kills · trades · rebalances</span></div><div id="feed"></div></section>
+<footer class="mut small">Research &amp; paper simulation only. Nothing here places orders. Past results are not future results.</footer>
+<script src="static/app.js"></script>
+</body></html>

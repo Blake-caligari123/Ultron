@@ -1,0 +1,39 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Ultron runtime data / state (never commit)
+data/
+results/
+logs/
+*.db
+*.db-*
+*.sqlite*
+*.log
+*.pid
+latest_*.json
+*.nbc
+*.nbi
+
+# Secrets
+.env
+.env*
+*.key
+*.pem
+*token*
+*secret*
+*state*
+tsstate/
+
+# Caches
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

@@ -1,0 +1,16 @@
+{
+  "_comment": "Floor-wide PAPER risk limits. Every bot entry must pass these (ultron/risk.py). Edit and the live floor picks changes up within a minute.",
+  "equity_start_usd": 10000,
+  "risk_per_trade": {"pct_per_unit_weight": 10.0, "min_pct": 0.25, "max_pct": 1.0,
+                     "_comment": "risk per trade (% of current paper equity) = allocator weight x 10, clamped to 0.25%..1%"},
+  "max_total_open_risk_pct": 5.0,
+  "max_open_trades": 8,
+  "max_same_direction_per_symbol": 3,
+  "daily_floor_loss_limit_pct": 4.0,
+  "daily_reset": "midnight Australia/Sydney",
+  "max_floor_drawdown_pct": 10.0,
+  "_comment_dd": "floor-wide kill: if paper equity (incl. open P&L) falls this % below its closed-trade peak, all new entries stop and open trades are closed. Resume by setting equity_reset_ts (unix s) or raising the limit.",
+  "equity_reset_ts": 0,
+  "max_bots_on_floor": 30,
+  "blocked_event_throttle_s": 900
+}
